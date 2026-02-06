@@ -586,6 +586,8 @@ ${content}
 			} catch (error) {
 				toast.error(`${error}`);
 			}
+		} else if (type === 'print-preview') {
+			goto(`/notes/${note.id}/print`);
 		}
 	};
 

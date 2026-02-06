@@ -84,6 +84,8 @@
 			} catch (error) {
 				toast.error(`${error}`);
 			}
+		} else if (type === 'print-preview') {
+			goto(`/notes/${selectedNote.id}/print`);
 		}
 	};
 

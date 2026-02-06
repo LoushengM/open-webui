@@ -145,6 +145,12 @@
 	import hljs from 'highlight.js';
 
 	import type { SocketIOCollaborationProvider } from './RichTextInput/Collaboration';
+	import {
+		buildLayoutPages,
+		mergePageLayoutConfig,
+		type LayoutPage,
+		type PageLayoutConfig
+	} from '$lib/components/notes/pageLayout';
 
 	export let oncompositionstart = (e) => {};
 	export let oncompositionend = (e) => {};
@@ -250,6 +256,9 @@
 	export let collaboration = false;
 
 	export let showFormattingToolbar = true;
+	export let renderMode: 'editor' | 'page-layout' = 'editor';
+	export let pageLayoutConfig: Partial<PageLayoutConfig> = {};
+	export let pageLayoutTitle = '';
 
 	export let preserveBreaks = false;
 	export let generateAutoCompletion: Function = async () => null;
@@ -258,6 +267,16 @@
 	export let shiftEnter = false;
 	export let largeTextAsFile = false;
 	export let insertPromptAsRichText = false;
+
+	let layoutPages: LayoutPage[] = [];
+	$: if (renderMode === 'page-layout') {
+		const layoutHtml = raw ? `${value ?? ''}` : html || `${value ?? ''}`;
+		layoutPages = buildLayoutPages({
+			title: pageLayoutTitle,
+			html: layoutHtml,
+			config: mergePageLayoutConfig(pageLayoutConfig)
+		});
+	}
 	export let floatingMenuPlacement = 'bottom-start';
 
 	let content = null;
@@ -644,6 +663,10 @@
 	});
 
 	onMount(async () => {
+		if (renderMode === 'page-layout') {
+			return;
+		}
+
 		content = value;
 
 		if (json) {
@@ -1176,9 +1199,45 @@
 		<FormattingButtons {editor} />
 	</div>
 {/if}
+{#if renderMode === 'page-layout'}
+	<div class="page-layout-root {className}">
+		{#each layoutPages as layoutPage (layoutPage.index)}
+			<div class="page-layout-sheet">
+				<div class="page-layout-header">{@html layoutPage.headerHtml}</div>
+				<div class="page-layout-body">{@html layoutPage.bodyHtml}</div>
+				<div class="page-layout-footer">{@html layoutPage.footerHtml}</div>
+			</div>
+		{/each}
+	</div>
+{:else}
+	<div
+		bind:this={element}
+		dir="auto"
+		class="relative w-full min-w-full {className} {!editable ? 'cursor-not-allowed' : ''}"
+	/>
+{/if}
 
-<div
-	bind:this={element}
-	dir="auto"
-	class="relative w-full min-w-full {className} {!editable ? 'cursor-not-allowed' : ''}"
-/>
+<style>
+	.page-layout-root {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+	.page-layout-sheet {
+		background: white;
+		color: black;
+		border-radius: 0.75rem;
+		border: 1px solid rgba(0, 0, 0, 0.08);
+		padding: 1rem 1.25rem;
+		box-shadow: 0 12px 36px rgba(15, 23, 42, 0.08);
+	}
+	.page-layout-header,
+	.page-layout-footer {
+		font-size: 0.8rem;
+		color: rgb(100 116 139);
+	}
+	.page-layout-body {
+		min-height: 10rem;
+		margin: 0.75rem 0;
+	}
+</style>
