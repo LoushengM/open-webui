@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 from functools import lru_cache
 
 from sqlalchemy.orm import Session
@@ -11,7 +11,7 @@ from open_webui.utils.access_control import has_access
 from open_webui.models.users import User, UserModel, Users, UserResponse
 
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import BigInteger, Boolean, Column, String, Text, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -40,6 +40,195 @@ class Note(Base):
     updated_at = Column(BigInteger)
 
 
+DOCUMENT_SCHEMA_VERSION = 2
+
+
+class NoteContentModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    json_content: Optional[dict[str, Any]] = Field(
+        default=None,
+        alias="json",
+        serialization_alias="json",
+    )
+    html: Optional[str] = None
+    md: Optional[str] = None
+
+
+class NoteCommentModel(BaseModel):
+    id: str
+    author_id: Optional[str] = None
+    content: Optional[str] = None
+    anchor: Optional[dict[str, Any]] = None
+    created_at: Optional[int] = None
+    updated_at: Optional[int] = None
+
+
+class NoteRevisionModel(BaseModel):
+    id: str
+    author_id: Optional[str] = None
+    summary: Optional[str] = None
+    created_at: Optional[int] = None
+    delta: Optional[dict[str, Any]] = None
+
+
+class NoteFootnoteModel(BaseModel):
+    id: str
+    content: Optional[str] = None
+    anchor: Optional[dict[str, Any]] = None
+
+
+class NoteReferenceModel(BaseModel):
+    id: str
+    type: Optional[str] = None
+    value: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NoteDocumentModel(BaseModel):
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    page_settings: dict[str, Any] = Field(default_factory=dict)
+    styles: dict[str, Any] = Field(default_factory=dict)
+    comments: list[NoteCommentModel] = Field(default_factory=list)
+    revisions: list[NoteRevisionModel] = Field(default_factory=list)
+    footnotes: list[NoteFootnoteModel] = Field(default_factory=list)
+    references: list[NoteReferenceModel] = Field(default_factory=list)
+
+
+class NoteDataModel(BaseModel):
+    content: NoteContentModel = Field(default_factory=NoteContentModel)
+    document_schema_version: int = DOCUMENT_SCHEMA_VERSION
+    document: NoteDocumentModel = Field(default_factory=NoteDocumentModel)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_shape(cls, value: Any):
+        if value is None:
+            return {}
+
+        if not isinstance(value, dict):
+            return value
+
+        raw_content = value.get("content")
+        if isinstance(raw_content, NoteContentModel):
+            content = raw_content.model_dump(exclude_none=True, by_alias=True)
+        elif isinstance(raw_content, dict):
+            content = raw_content
+        else:
+            content = {}
+
+        # Legacy shape support: direct json/html/md at root.
+        for key in ("json", "html", "md"):
+            if key in value and key not in content:
+                content[key] = value.get(key)
+
+        document = value.get("document")
+        if isinstance(document, NoteDocumentModel):
+            document = document.model_dump(exclude_none=True)
+        elif not isinstance(document, dict):
+            document = {}
+
+        document = {
+            "sections": document.get("sections") if isinstance(document.get("sections"), list) else [],
+            "page_settings": document.get("page_settings") if isinstance(document.get("page_settings"), dict) else {},
+            "styles": document.get("styles") if isinstance(document.get("styles"), dict) else {},
+            "comments": document.get("comments") if isinstance(document.get("comments"), list) else [],
+            "revisions": document.get("revisions") if isinstance(document.get("revisions"), list) else [],
+            "footnotes": document.get("footnotes") if isinstance(document.get("footnotes"), list) else [],
+            "references": document.get("references") if isinstance(document.get("references"), list) else [],
+        }
+
+        return {
+            "content": content,
+            "document_schema_version": value.get(
+                "document_schema_version", DOCUMENT_SCHEMA_VERSION
+            ),
+            "document": document,
+        }
+
+
+def _document_has_extended_features(document: NoteDocumentModel) -> bool:
+    return any(
+        [
+            bool(document.sections),
+            bool(document.page_settings),
+            bool(document.styles),
+            bool(document.comments),
+            bool(document.revisions),
+            bool(document.footnotes),
+            bool(document.references),
+        ]
+    )
+
+
+def normalize_note_data(data: Optional[dict[str, Any] | NoteDataModel]) -> Optional[dict[str, Any]]:
+    if data is None:
+        return None
+
+    normalized = NoteDataModel.model_validate(data)
+    return normalized.model_dump(exclude_none=True, by_alias=True)
+
+
+def maybe_downgrade_note_data(data: Optional[dict[str, Any] | NoteDataModel]) -> Optional[dict[str, Any]]:
+    """Downgrade back to legacy shape when no document-level features are used."""
+    if data is None:
+        return None
+
+    normalized = NoteDataModel.model_validate(data)
+    if _document_has_extended_features(normalized.document):
+        return normalized.model_dump(exclude_none=True, by_alias=True)
+
+    return {"content": normalized.content.model_dump(exclude_none=True, by_alias=True)}
+
+
+def merge_note_data(
+    base: Optional[dict[str, Any] | NoteDataModel],
+    incoming: Optional[dict[str, Any] | NoteDataModel],
+):
+    if incoming is None:
+        return maybe_downgrade_note_data(normalize_note_data(base))
+
+    base_model = NoteDataModel.model_validate(base or {})
+
+    incoming_payload = (
+        incoming.model_dump(exclude_none=True, by_alias=True)
+        if isinstance(incoming, NoteDataModel)
+        else incoming
+    )
+    incoming_payload = incoming_payload or {}
+
+    incoming_content = incoming_payload.get("content")
+    if not isinstance(incoming_content, dict):
+        incoming_content = {
+            key: incoming_payload.get(key)
+            for key in ("json", "html", "md")
+            if key in incoming_payload
+        }
+
+    merged_content = NoteContentModel.model_validate(
+        {
+            **base_model.content.model_dump(exclude_none=True, by_alias=True),
+            **incoming_content,
+        }
+    )
+
+    merged_document = base_model.document.model_dump(exclude_none=True)
+    incoming_document = incoming_payload.get("document")
+    if isinstance(incoming_document, dict):
+        merged_document.update(incoming_document)
+
+    merged = NoteDataModel(
+        content=merged_content,
+        document_schema_version=max(
+            base_model.document_schema_version,
+            incoming_payload.get("document_schema_version", DOCUMENT_SCHEMA_VERSION),
+        ),
+        document=NoteDocumentModel.model_validate(merged_document),
+    )
+
+    return maybe_downgrade_note_data(merged.model_dump(exclude_none=True, by_alias=True))
+
+
 class NoteModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -47,7 +236,7 @@ class NoteModel(BaseModel):
     user_id: str
 
     title: str
-    data: Optional[dict] = None
+    data: Optional[NoteDataModel | dict[str, Any]] = None
     meta: Optional[dict] = None
 
     access_control: Optional[dict] = None
@@ -63,14 +252,14 @@ class NoteModel(BaseModel):
 
 class NoteForm(BaseModel):
     title: str
-    data: Optional[dict] = None
+    data: Optional[NoteDataModel | dict[str, Any]] = None
     meta: Optional[dict] = None
     access_control: Optional[dict] = None
 
 
 class NoteUpdateForm(BaseModel):
     title: Optional[str] = None
-    data: Optional[dict] = None
+    data: Optional[NoteDataModel | dict[str, Any]] = None
     meta: Optional[dict] = None
     access_control: Optional[dict] = None
 
@@ -101,7 +290,7 @@ class NoteUserResponse(NoteModel):
 class NoteItemResponse(BaseModel):
     id: str
     title: str
-    data: Optional[dict]
+    data: Optional[NoteDataModel | dict[str, Any]]
     updated_at: int
     created_at: int
     user: Optional[UserResponse] = None
@@ -238,7 +427,12 @@ class NoteTable:
                 **{
                     "id": str(uuid.uuid4()),
                     "user_id": user_id,
-                    **form_data.model_dump(),
+                    **{
+                        **form_data.model_dump(),
+                        "data": maybe_downgrade_note_data(
+                            normalize_note_data(form_data.data)
+                        ),
+                    },
                     "created_at": int(time.time_ns()),
                     "updated_at": int(time.time_ns()),
                 }
@@ -260,7 +454,12 @@ class NoteTable:
             if limit is not None:
                 query = query.limit(limit)
             notes = query.all()
-            return [NoteModel.model_validate(note) for note in notes]
+            return [self._to_note_model(note) for note in notes]
+
+    def _to_note_model(self, note: Note) -> NoteModel:
+        note_model = NoteModel.model_validate(note)
+        note_model.data = normalize_note_data(note_model.data)
+        return note_model
 
     def search_notes(
         self,
@@ -349,7 +548,7 @@ class NoteTable:
             for note, user in items:
                 notes.append(
                     NoteUserResponse(
-                        **NoteModel.model_validate(note).model_dump(),
+                        **self._to_note_model(note).model_dump(),
                         user=(
                             UserResponse(**UserModel.model_validate(user).model_dump())
                             if user
@@ -384,14 +583,14 @@ class NoteTable:
                 query = query.limit(limit)
 
             notes = query.all()
-            return [NoteModel.model_validate(note) for note in notes]
+            return [self._to_note_model(note) for note in notes]
 
     def get_note_by_id(
         self, id: str, db: Optional[Session] = None
     ) -> Optional[NoteModel]:
         with get_db_context(db) as db:
             note = db.query(Note).filter(Note.id == id).first()
-            return NoteModel.model_validate(note) if note else None
+            return self._to_note_model(note) if note else None
 
     def update_note_by_id(
         self, id: str, form_data: NoteUpdateForm, db: Optional[Session] = None
@@ -406,7 +605,7 @@ class NoteTable:
             if "title" in form_data:
                 note.title = form_data["title"]
             if "data" in form_data:
-                note.data = {**note.data, **form_data["data"]}
+                note.data = merge_note_data(note.data, form_data["data"])
             if "meta" in form_data:
                 note.meta = {**note.meta, **form_data["meta"]}
 
@@ -416,7 +615,7 @@ class NoteTable:
             note.updated_at = int(time.time_ns())
 
             db.commit()
-            return NoteModel.model_validate(note) if note else None
+            return self._to_note_model(note) if note else None
 
     def delete_note_by_id(self, id: str, db: Optional[Session] = None) -> bool:
         try:
