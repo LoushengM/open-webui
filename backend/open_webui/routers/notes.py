@@ -1,10 +1,12 @@
 import json
 import logging
 from typing import Optional
+from urllib.parse import quote
 
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File, Form
 from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
 
 from open_webui.socket.main import sio
 
@@ -17,6 +19,7 @@ from open_webui.models.notes import (
     NoteForm,
     NoteUserResponse,
 )
+from open_webui.utils.notes_docx_conversion import import_docx, export_note_to_docx
 
 from open_webui.config import (
     BYPASS_ADMIN_ACCESS_CONTROL,
@@ -47,6 +50,11 @@ class NoteItemResponse(BaseModel):
     updated_at: int
     created_at: int
     user: Optional[UserResponse] = None
+
+
+class NoteDocxImportResponse(BaseModel):
+    note: NoteModel
+    report: dict
 
 
 @router.get("/", response_model=list[NoteItemResponse])
@@ -334,3 +342,128 @@ async def delete_note_by_id(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT()
         )
+
+
+@router.post("/import/docx", response_model=NoteDocxImportResponse)
+async def import_note_docx(
+    request: Request,
+    file: UploadFile = File(...),
+    store_original_attachment: bool = Form(False),
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    if user.role != "admin" and not has_permission(
+        user.id, "features.notes", request.app.state.config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.UNAUTHORIZED,
+        )
+
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .docx files are supported",
+        )
+
+    try:
+        content = await file.read()
+        conversion = import_docx(
+            content, file.filename, store_original_attachment=store_original_attachment
+        )
+
+        meta = {
+            "docx_import": {
+                "report": conversion.report,
+            }
+        }
+
+        if conversion.original_attachment is not None:
+            meta["docx_import"]["original_attachment"] = conversion.original_attachment
+
+        note = Notes.insert_new_note(
+            user.id,
+            NoteForm(
+                title=conversion.title,
+                data={
+                    "content": {
+                        "json": None,
+                        "html": conversion.html,
+                        "md": conversion.markdown,
+                    }
+                },
+                meta=meta,
+                access_control={},
+            ),
+            db=db,
+        )
+
+        return NoteDocxImportResponse(note=note, report=conversion.report)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"DOCX import failed: {e}",
+        )
+
+
+@router.get("/{id}/export/docx")
+async def export_note_docx(
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    if user.role != "admin" and not has_permission(
+        user.id, "features.notes", request.app.state.config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.UNAUTHORIZED,
+        )
+
+    note = Notes.get_note_by_id(id, db=db)
+    if not note:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND
+        )
+
+    if user.role != "admin" and (
+        user.id != note.user_id
+        and (
+            not has_access(
+                user.id, type="read", access_control=note.access_control, db=db
+            )
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.DEFAULT()
+        )
+
+    markdown_content = ((note.data or {}).get("content") or {}).get("md", "")
+    title = note.title or "note"
+
+    try:
+        docx_bytes, report = export_note_to_docx(title, markdown_content)
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"DOCX export failed: {e}",
+        )
+
+    filename = f"{title}.docx"
+    safe_filename = quote(filename)
+
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{safe_filename}",
+        "X-Docx-Export-Report": quote(json.dumps(report)),
+    }
+
+    return StreamingResponse(
+        iter([docx_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers=headers,
+    )

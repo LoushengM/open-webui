@@ -21,6 +21,7 @@
 	export let className = 'max-w-[180px]';
 
 	export let onDownload = (type) => {};
+	export let onImportDocx = null;
 	export let onDelete = () => {};
 
 	export let onCopyLink = null;
@@ -47,7 +48,20 @@
 			align="end"
 			transition={(e) => fade(e, { duration: 100 })}
 		>
-			<DropdownMenu.Sub>
+			
+			{#if onImportDocx}
+				<DropdownMenu.Item
+					class="flex gap-2 items-center px-3 py-1.5 text-sm  cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl"
+					on:click={() => {
+						onImportDocx();
+					}}
+				>
+					<ArchiveBox strokeWidth="2" />
+					<div class="flex items-center line-clamp-1">{$i18n.t('Import Word document (.docx)')}</div>
+				</DropdownMenu.Item>
+			{/if}
+
+<DropdownMenu.Sub>
 				<DropdownMenu.SubTrigger
 					class="flex gap-2 items-center px-3 py-1.5 text-sm  cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl"
 				>
@@ -91,10 +105,10 @@
 					<DropdownMenu.Item
 						class="flex gap-2 items-center px-3 py-1.5 text-sm  cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl"
 						on:click={() => {
-							onDownload('print-preview');
+							onDownload('docx');
 						}}
 					>
-						<div class="flex items-center line-clamp-1">{$i18n.t('Print preview')}</div>
+						<div class="flex items-center line-clamp-1">{$i18n.t('Word document (.docx)')}</div>
 					</DropdownMenu.Item>
 				</DropdownMenu.SubContent>
 			</DropdownMenu.Sub>

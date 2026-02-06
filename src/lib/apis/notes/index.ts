@@ -284,3 +284,70 @@ export const deleteNoteById = async (token: string, id: string) => {
 
 	return res;
 };
+
+
+export const importNoteDocx = async (
+	token: string,
+	file: File,
+	storeOriginalAttachment: boolean = false
+) => {
+	let error = null;
+	const formData = new FormData();
+	formData.append('file', file);
+	formData.append('store_original_attachment', `${storeOriginalAttachment}`);
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/import/docx`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: formData
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const exportNoteDocx = async (token: string, id: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/export/docx`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+
+			const blob = await res.blob();
+			const reportHeader = res.headers.get('X-Docx-Export-Report');
+			const report = reportHeader ? decodeURIComponent(reportHeader) : null;
+			return { blob, report };
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};

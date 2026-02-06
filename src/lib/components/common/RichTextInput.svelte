@@ -283,6 +283,48 @@
 	let htmlValue = '';
 	let jsonValue = '';
 	let mdValue = '';
+	let findTerm = '';
+	let replaceTerm = '';
+	let headingOutline: Array<{ id: string; level: number; text: string; pos: number }> = [];
+	let jumpAnchors: Array<{ id: string; label: string; pos: number; type: 'comment' | 'revision' }> = [];
+	let activeFindMatchIndex = -1;
+	let findMatches: Array<{ from: number; to: number; text: string }> = [];
+	let showNavigationPane = false;
+
+	let transformDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let markdownParseDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let lazyRenderTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const DOC_SIZE_THRESHOLDS = {
+		chars: 60_000,
+		nodes: 4_000,
+		tableCells: 800,
+		imageSourceChars: 150_000
+	};
+
+	const LARGE_NODE_THRESHOLDS = {
+		tableCells: 300,
+		imageSourceChars: 120_000
+	};
+
+	const PERFORMANCE_SLOS = {
+		typingLatencyMsP95: 24,
+		initialLoadMsP95: 1200
+	};
+
+	let documentMetrics = {
+		charCount: 0,
+		nodeCount: 0,
+		tableCellCount: 0,
+		imageCount: 0,
+		largestImageSourceChars: 0
+	};
+
+	let transactionProfiling = {
+		lastTransactionMs: 0,
+		lastTransformMs: 0,
+		lastInitialLoadMs: 0
+	};
 
 	let provider: SocketIOCollaborationProvider | null = null;
 
@@ -292,6 +334,165 @@
 
 	const options = {
 		throwOnError: false
+	};
+
+	const isLargeDocument = () =>
+		documentMetrics.charCount > DOC_SIZE_THRESHOLDS.chars ||
+		documentMetrics.nodeCount > DOC_SIZE_THRESHOLDS.nodes ||
+		documentMetrics.tableCellCount > DOC_SIZE_THRESHOLDS.tableCells ||
+		documentMetrics.largestImageSourceChars > DOC_SIZE_THRESHOLDS.imageSourceChars;
+
+	const debounce = (cb: () => void, delay: number, timer: ReturnType<typeof setTimeout> | null) => {
+		if (timer) clearTimeout(timer);
+		return setTimeout(cb, delay);
+	};
+
+	const profile = <T>(label: string, callback: () => T) => {
+		const start = performance.now();
+		const result = callback();
+		const elapsed = performance.now() - start;
+		if (label === 'transaction') transactionProfiling.lastTransactionMs = elapsed;
+		if (label === 'transform') transactionProfiling.lastTransformMs = elapsed;
+		if (label === 'initial-load') transactionProfiling.lastInitialLoadMs = elapsed;
+		if (elapsed > PERFORMANCE_SLOS.typingLatencyMsP95 && label === 'transaction') {
+			console.warn('[RichTextInput:SLO] typing latency exceeded', { elapsed, slo: PERFORMANCE_SLOS.typingLatencyMsP95 });
+		}
+		return result;
+	};
+
+	const measureDocumentSize = (currentEditor: Editor) => {
+		let nodeCount = 0;
+		let tableCellCount = 0;
+		let imageCount = 0;
+		let largestImageSourceChars = 0;
+		currentEditor.state.doc.descendants((node) => {
+			nodeCount += 1;
+			if (node.type.name === 'tableCell' || node.type.name === 'tableHeader') tableCellCount += 1;
+			if (node.type.name === 'image') {
+				imageCount += 1;
+				const src = String(node.attrs?.src ?? '');
+				largestImageSourceChars = Math.max(largestImageSourceChars, src.length);
+			}
+		});
+		documentMetrics = {
+			charCount: currentEditor.state.doc.textContent.length,
+			nodeCount,
+			tableCellCount,
+			imageCount,
+			largestImageSourceChars
+		};
+	};
+
+	const updateOutlineAndAnchors = (currentEditor: Editor) => {
+		const headings = [];
+		const anchors = [];
+		currentEditor.state.doc.descendants((node, pos) => {
+			if (node.type.name === 'heading') {
+				headings.push({
+					id: `heading-${pos}`,
+					level: node.attrs.level || 1,
+					text: node.textContent || `Heading ${headings.length + 1}`,
+					pos
+				});
+			}
+			if (node.type.name === 'paragraph') {
+				const text = node.textContent || '';
+				if (text.includes('[comment:')) anchors.push({ id: `comment-${pos}`, label: text.slice(0, 64), pos, type: 'comment' });
+				if (text.includes('[revision:')) anchors.push({ id: `revision-${pos}`, label: text.slice(0, 64), pos, type: 'revision' });
+			}
+		});
+		headingOutline = headings;
+		jumpAnchors = anchors;
+	};
+
+	const isLargeNode = (node) => {
+		if (node.type.name === 'table') {
+			let cells = 0;
+			node.descendants((child) => {
+				if (child.type.name === 'tableCell' || child.type.name === 'tableHeader') cells += 1;
+			});
+			return cells > LARGE_NODE_THRESHOLDS.tableCells;
+		}
+		if (node.type.name === 'image') {
+			return String(node.attrs?.src ?? '').length > LARGE_NODE_THRESHOLDS.imageSourceChars;
+		}
+		return false;
+	};
+
+	const applyLazyRendering = (currentEditor: Editor) => {
+		if (!isLargeDocument()) return;
+		let oversizedNodeCount = 0;
+		currentEditor.state.doc.descendants((node) => {
+			if (isLargeNode(node)) oversizedNodeCount += 1;
+		});
+		if (oversizedNodeCount === 0) return;
+		lazyRenderTimer = debounce(() => {
+			const tables = element?.querySelectorAll('.ProseMirror table') ?? [];
+			tables.forEach((table) => {
+				const rows = table.querySelectorAll('tr');
+				rows.forEach((row, idx) => {
+					(row as HTMLElement).style.display = idx > 40 ? 'none' : '';
+				});
+			});
+			const images = element?.querySelectorAll('.ProseMirror img') ?? [];
+			images.forEach((img) => {
+				(img as HTMLImageElement).loading = 'lazy';
+				(img as HTMLImageElement).decoding = 'async';
+			});
+		}, 120, lazyRenderTimer);
+	};
+
+	const recalculateFindMatches = (currentEditor: Editor) => {
+		if (!findTerm.trim()) {
+			findMatches = [];
+			activeFindMatchIndex = -1;
+			return;
+		}
+		const term = findTerm.toLowerCase();
+		const results = [];
+		currentEditor.state.doc.descendants((node, pos) => {
+			if (!node.isText || !node.text) return;
+			let cursor = 0;
+			const lower = node.text.toLowerCase();
+			while (cursor < lower.length) {
+				const idx = lower.indexOf(term, cursor);
+				if (idx === -1) break;
+				results.push({ from: pos + idx, to: pos + idx + findTerm.length, text: node.text.slice(idx, idx + findTerm.length) });
+				cursor = idx + Math.max(1, findTerm.length);
+			}
+		});
+		findMatches = results;
+		activeFindMatchIndex = results.length > 0 ? 0 : -1;
+	};
+
+	const jumpToPos = (pos: number) => {
+		if (!editor) return;
+		const resolved = editor.state.doc.resolve(Math.min(pos + 1, editor.state.doc.content.size));
+		editor.view.dispatch(editor.state.tr.setSelection(Selection.near(resolved)).scrollIntoView());
+		editor.commands.focus();
+	};
+
+	const findNext = () => {
+		if (!editor || findMatches.length === 0) return;
+		activeFindMatchIndex = (activeFindMatchIndex + 1) % findMatches.length;
+		jumpToPos(findMatches[activeFindMatchIndex].from);
+	};
+
+	const replaceCurrentMatch = () => {
+		if (!editor || activeFindMatchIndex < 0 || activeFindMatchIndex >= findMatches.length) return;
+		const match = findMatches[activeFindMatchIndex];
+		editor.view.dispatch(editor.state.tr.insertText(replaceTerm, match.from, match.to));
+		recalculateFindMatches(editor);
+	};
+
+	const replaceAllMatches = () => {
+		if (!editor || findMatches.length === 0) return;
+		let tr = editor.state.tr;
+		[...findMatches].reverse().forEach((match) => {
+			tr = tr.insertText(replaceTerm, match.from, match.to);
+		});
+		editor.view.dispatch(tr);
+		recalculateFindMatches(editor);
 	};
 
 	$: if (editor) {
@@ -663,10 +864,7 @@
 	});
 
 	onMount(async () => {
-		if (renderMode === 'page-layout') {
-			return;
-		}
-
+		const mountStart = performance.now();
 		content = value;
 
 		if (json) {
@@ -822,60 +1020,44 @@
 				editor = editor;
 				if (!editor) return;
 
-				htmlValue = editor.getHTML();
-				jsonValue = editor.getJSON();
+				profile('transaction', () => {
+					htmlValue = editor.getHTML();
+					jsonValue = editor.getJSON();
+					measureDocumentSize(editor);
+					updateOutlineAndAnchors(editor);
+					recalculateFindMatches(editor);
 
-				if (richText) {
-					mdValue = turndownService
-						.turndown(
-							htmlValue
-								.replace(/<p><\/p>/g, '<br/>')
-								.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
-						)
-						.replace(/\u00a0/g, ' ');
-				} else {
-					mdValue = turndownService
-						.turndown(
-							htmlValue
-								// Replace empty paragraphs with line breaks
-								.replace(/<p><\/p>/g, '<br/>')
-								// Replace multiple spaces with non-breaking spaces
-								.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
-								// Replace tabs with non-breaking spaces (preserve indentation)
-								.replace(/\t/g, '\u00a0\u00a0\u00a0\u00a0') // 1 tab = 4 spaces
-						)
-						// Convert non-breaking spaces back to regular spaces for markdown
-						.replace(/\u00a0/g, ' ');
-				}
+					transformDebounceTimer = debounce(() => {
+						mdValue = profile('transform', () =>
+							turndownService
+								.turndown(
+									htmlValue
+										.replace(/<p><\/p>/g, '<br/>')
+										.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
+										.replace(/\t/g, '\u00a0\u00a0\u00a0\u00a0')
+								)
+								.replace(/\u00a0/g, ' ')
+						);
 
-				onChange({
-					html: htmlValue,
-					json: jsonValue,
-					md: mdValue
-				});
-
-				if (json) {
-					value = jsonValue;
-				} else {
-					if (raw) {
-						value = htmlValue;
-					} else {
 						if (!preserveBreaks) {
 							mdValue = mdValue.replace(/<br\/>/g, '');
 						}
 
-						if (value !== mdValue) {
+						onChange({ html: htmlValue, json: jsonValue, md: mdValue });
+						if (json) {
+							value = jsonValue;
+						} else if (raw) {
+							value = htmlValue;
+						} else if (value !== mdValue) {
 							value = mdValue;
-
-							// check if the node is paragraph as well
-							if (editor.isActive('paragraph')) {
-								if (value === '') {
-									editor.commands.clearContent();
-								}
+							if (editor.isActive('paragraph') && value === '') {
+								editor.commands.clearContent();
 							}
 						}
-					}
-				}
+					}, isLargeDocument() ? 180 : 30, transformDebounceTimer);
+
+					applyLazyRendering(editor);
+				});
 			},
 			editorProps: {
 				attributes: { id },
@@ -1125,6 +1307,13 @@
 		if (messageInput) {
 			selectTemplate();
 		}
+
+		profile('initial-load', () => {
+			transactionProfiling.lastInitialLoadMs = performance.now() - mountStart;
+			if (transactionProfiling.lastInitialLoadMs > PERFORMANCE_SLOS.initialLoadMsP95) {
+				console.warn('[RichTextInput:SLO] initial load exceeded', { elapsed: transactionProfiling.lastInitialLoadMs, slo: PERFORMANCE_SLOS.initialLoadMsP95 });
+			}
+		});
 	});
 
 	onDestroy(() => {
@@ -1135,6 +1324,9 @@
 		if (editor) {
 			editor.destroy();
 		}
+		if (transformDebounceTimer) clearTimeout(transformDebounceTimer);
+		if (markdownParseDebounceTimer) clearTimeout(markdownParseDebounceTimer);
+		if (lazyRenderTimer) clearTimeout(lazyRenderTimer);
 	});
 
 	$: if (value !== null && editor && !collaboration) {
@@ -1175,15 +1367,16 @@
 				}
 			} else {
 				if (value !== mdValue) {
-					editor.commands.setContent(
-						preserveBreaks
-							? value
-							: marked.parse(value.replaceAll(`\n<br/>`, `<br/>`), {
-									breaks: false
-								})
-					);
-
-					selectTemplate();
+					markdownParseDebounceTimer = debounce(() => {
+						editor?.commands.setContent(
+							preserveBreaks
+								? value
+								: marked.parse(value.replaceAll(`\n<br/>`, `<br/>`), {
+										breaks: false
+									})
+						);
+						selectTemplate();
+					}, isLargeDocument() ? 160 : 0, markdownParseDebounceTimer);
 				}
 			}
 		}
@@ -1217,27 +1410,71 @@
 	/>
 {/if}
 
-<style>
-	.page-layout-root {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-	.page-layout-sheet {
-		background: white;
-		color: black;
-		border-radius: 0.75rem;
-		border: 1px solid rgba(0, 0, 0, 0.08);
-		padding: 1rem 1.25rem;
-		box-shadow: 0 12px 36px rgba(15, 23, 42, 0.08);
-	}
-	.page-layout-header,
-	.page-layout-footer {
-		font-size: 0.8rem;
-		color: rgb(100 116 139);
-	}
-	.page-layout-body {
-		min-height: 10rem;
-		margin: 0.75rem 0;
-	}
-</style>
+
+<div class="mb-2 flex flex-wrap items-center gap-2 text-xs">
+	<button type="button" class="rounded border px-2 py-1" on:click={() => (showNavigationPane = !showNavigationPane)}>
+		{showNavigationPane ? 'Hide' : 'Show'} document navigation
+	</button>
+	{#if editor}
+		<span class="opacity-70">Chars: {documentMetrics.charCount}</span>
+		<span class="opacity-70">Nodes: {documentMetrics.nodeCount}</span>
+		<span class="opacity-70">Tx: {transactionProfiling.lastTransactionMs.toFixed(1)}ms</span>
+		<span class="opacity-70">Load: {transactionProfiling.lastInitialLoadMs.toFixed(1)}ms</span>
+	{/if}
+</div>
+
+{#if showNavigationPane}
+	<div class="mb-3 rounded border p-3 text-sm">
+		<div class="mb-2 font-semibold">Outline</div>
+		{#if headingOutline.length === 0}
+			<div class="mb-3 text-xs opacity-70">No headings detected.</div>
+		{:else}
+			<ul class="mb-3 space-y-1">
+				{#each headingOutline as heading}
+					<li>
+						<button
+							type="button"
+							on:click={() => jumpToPos(heading.pos)}
+							class="text-left underline-offset-2 hover:underline"
+							style={`margin-left: ${(heading.level - 1) * 10}px`}
+						>
+							{heading.text}
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+
+		<div class="mb-2 font-semibold">Find / Replace</div>
+		<div class="mb-2 grid gap-2 md:grid-cols-2">
+			<input class="rounded border px-2 py-1" placeholder="Find" bind:value={findTerm} on:input={() => editor && recalculateFindMatches(editor)} />
+			<input class="rounded border px-2 py-1" placeholder="Replace" bind:value={replaceTerm} />
+		</div>
+		<div class="mb-3 flex flex-wrap gap-2">
+			<button type="button" class="rounded border px-2 py-1" on:click={findNext}>Next ({findMatches.length})</button>
+			<button type="button" class="rounded border px-2 py-1" on:click={replaceCurrentMatch}>Replace</button>
+			<button type="button" class="rounded border px-2 py-1" on:click={replaceAllMatches}>Replace all</button>
+		</div>
+
+		<div class="mb-2 font-semibold">Comments / Revisions</div>
+		{#if jumpAnchors.length === 0}
+			<div class="text-xs opacity-70">No [comment:] or [revision:] markers found.</div>
+		{:else}
+			<ul class="space-y-1">
+				{#each jumpAnchors as anchor}
+					<li>
+						<button type="button" class="underline-offset-2 hover:underline" on:click={() => jumpToPos(anchor.pos)}>
+							[{anchor.type}] {anchor.label}
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</div>
+{/if}
+
+<div
+	bind:this={element}
+	dir="auto"
+	class="relative w-full min-w-full {className} {!editable ? 'cursor-not-allowed' : ''}"
+/>
