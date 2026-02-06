@@ -285,98 +285,69 @@ export const deleteNoteById = async (token: string, id: string) => {
 	return res;
 };
 
-export const getNoteRevisions = async (token: string, id: string) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/revisions`, {
-		method: 'GET',
-		headers: {
-			Accept: 'application/json',
-			'Content-Type': 'application/json',
-			authorization: `Bearer ${token}`
-		}
-	});
 
-	if (!res.ok) throw (await res.json()).detail;
-	return res.json();
-};
+export const importNoteDocx = async (
+	token: string,
+	file: File,
+	storeOriginalAttachment: boolean = false
+) => {
+	let error = null;
+	const formData = new FormData();
+	formData.append('file', file);
+	formData.append('store_original_attachment', `${storeOriginalAttachment}`);
 
-export const getNoteComments = async (token: string, id: string) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments`, {
-		method: 'GET',
-		headers: {
-			Accept: 'application/json',
-			'Content-Type': 'application/json',
-			authorization: `Bearer ${token}`
-		}
-	});
-
-	if (!res.ok) throw (await res.json()).detail;
-	return res.json();
-};
-
-export const createNoteComment = async (token: string, id: string, comment: object) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments/create`, {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/import/docx`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
-			'Content-Type': 'application/json',
 			authorization: `Bearer ${token}`
 		},
-		body: JSON.stringify(comment)
-	});
+		body: formData
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
 
-	if (!res.ok) throw (await res.json()).detail;
-	return res.json();
+	if (error) {
+		throw error;
+	}
+
+	return res;
 };
 
-export const updateNoteComment = async (
-	token: string,
-	id: string,
-	commentId: string,
-	comment: object
-) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments/${commentId}/update`, {
-		method: 'POST',
-		headers: {
-			Accept: 'application/json',
-			'Content-Type': 'application/json',
-			authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify(comment)
-	});
+export const exportNoteDocx = async (token: string, id: string) => {
+	let error = null;
 
-	if (!res.ok) throw (await res.json()).detail;
-	return res.json();
-};
-
-export const deleteNoteComment = async (token: string, id: string, commentId: string) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments/${commentId}/delete`, {
-		method: 'DELETE',
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/export/docx`, {
+		method: 'GET',
 		headers: {
-			Accept: 'application/json',
-			'Content-Type': 'application/json',
+			Accept: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 			authorization: `Bearer ${token}`
 		}
-	});
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
 
-	if (!res.ok) throw (await res.json()).detail;
-	return res.json();
-};
+			const blob = await res.blob();
+			const reportHeader = res.headers.get('X-Docx-Export-Report');
+			const report = reportHeader ? decodeURIComponent(reportHeader) : null;
+			return { blob, report };
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
 
-export const actOnNoteRevision = async (
-	token: string,
-	id: string,
-	revisionId: string,
-	action: 'accept' | 'reject'
-) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/revisions/${revisionId}/${action}`, {
-		method: 'POST',
-		headers: {
-			Accept: 'application/json',
-			'Content-Type': 'application/json',
-			authorization: `Bearer ${token}`
-		}
-	});
+	if (error) {
+		throw error;
+	}
 
-	if (!res.ok) throw (await res.json()).detail;
-	return res.json();
+	return res;
 };

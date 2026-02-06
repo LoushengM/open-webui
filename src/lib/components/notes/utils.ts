@@ -2,106 +2,83 @@ import DOMPurify from 'dompurify';
 import { toast } from 'svelte-sonner';
 
 import { createNewNote } from '$lib/apis/notes';
+import { buildLayoutPages, mergePageLayoutConfig, type PageLayoutConfig } from './pageLayout';
 
-export const downloadPdf = async (note) => {
+const renderPageCanvas = async (
+	html2canvas,
+	{
+		title,
+		headerHtml,
+		bodyHtml,
+		footerHtml
+	}: {
+		title: string;
+		headerHtml: string;
+		bodyHtml: string;
+		footerHtml: string;
+	}
+) => {
+	const host = document.createElement('div');
+	host.style.width = '794px';
+	host.style.background = 'white';
+	host.style.color = 'black';
+	host.style.position = 'absolute';
+	host.style.left = '-10000px';
+	host.style.top = '0';
+	host.style.padding = '48px';
+	host.style.display = 'flex';
+	host.style.flexDirection = 'column';
+	host.style.gap = '16px';
+
+	host.innerHTML = `
+		<header style="font-size:12px;color:#475569;display:flex;justify-content:space-between">${headerHtml}</header>
+		<h1 style="font-size:22px;margin:0;line-height:1.2">${title}</h1>
+		<main style="font-size:14px;line-height:1.6">${bodyHtml}</main>
+		<footer style="margin-top:16px;font-size:12px;color:#64748b">${footerHtml}</footer>
+	`;
+
+	document.body.appendChild(host);
+	const canvas = await html2canvas(host, {
+		useCORS: true,
+		backgroundColor: '#fff',
+		scale: 2,
+		width: host.clientWidth,
+		windowWidth: host.clientWidth
+	});
+	document.body.removeChild(host);
+	return canvas;
+};
+
+export const downloadPdf = async (note, config: Partial<PageLayoutConfig> = {}) => {
 	const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
 		import('jspdf'),
 		import('html2canvas-pro')
 	]);
 
-	// Define a fixed virtual screen size
-	const virtualWidth = 1024; // Fixed width (adjust as needed)
-	const virtualHeight = 1400; // Fixed height (adjust as needed)
-
-	// STEP 1. Get a DOM node to render
 	const html = DOMPurify.sanitize(note.data?.content?.html ?? '');
-	const isDarkMode = document.documentElement.classList.contains('dark');
-
-	let node;
-	if (html instanceof HTMLElement) {
-		node = html;
-	} else {
-		const virtualWidth = 800; // px, fixed width for cloned element
-
-		// Clone and style
-		node = document.createElement('div');
-
-		// title node
-		const titleNode = document.createElement('div');
-		titleNode.textContent = note.title;
-		titleNode.style.fontSize = '24px';
-		titleNode.style.fontWeight = 'medium';
-		titleNode.style.paddingBottom = '20px';
-		titleNode.style.color = isDarkMode ? 'white' : 'black';
-		node.appendChild(titleNode);
-
-		const contentNode = document.createElement('div');
-
-		contentNode.innerHTML = html;
-
-		node.appendChild(contentNode);
-
-		node.classList.add('text-black');
-		node.classList.add('dark:text-white');
-		node.style.width = `${virtualWidth}px`;
-		node.style.position = 'absolute';
-		node.style.left = '-9999px';
-		node.style.height = 'auto';
-		node.style.padding = '40px 40px';
-
-		console.log(node);
-		document.body.appendChild(node);
-	}
-
-	// Render to canvas with predefined width
-	const canvas = await html2canvas(node, {
-		useCORS: true,
-		backgroundColor: isDarkMode ? '#000' : '#fff',
-		scale: 2, // Keep at 1x to avoid unexpected enlargements
-		width: virtualWidth, // Set fixed virtual screen width
-		windowWidth: virtualWidth, // Ensure consistent rendering
-		windowHeight: virtualHeight
+	const pages = buildLayoutPages({
+		title: note.title,
+		html,
+		config: mergePageLayoutConfig(config)
 	});
 
-	// Remove hidden node if needed
-	if (!(html instanceof HTMLElement)) {
-		document.body.removeChild(node);
-	}
-
-	const imgData = canvas.toDataURL('image/jpeg', 0.7);
-
-	// A4 page settings
 	const pdf = new jsPDF('p', 'mm', 'a4');
-	const imgWidth = 210; // A4 width in mm
-	const pageWidthMM = 210; // A4 width in mm
-	const pageHeight = 297; // A4 height in mm
-	const pageHeightMM = 297; // A4 height in mm
-
-	if (isDarkMode) {
-		pdf.setFillColor(0, 0, 0);
-		pdf.rect(0, 0, pageWidthMM, pageHeightMM, 'F'); // black bg
-	}
-
-	// Maintain aspect ratio
-	const imgHeight = (canvas.height * imgWidth) / canvas.width;
-	let heightLeft = imgHeight;
-	let position = 0;
-
-	pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
-	heightLeft -= pageHeight;
-
-	// Handle additional pages
-	while (heightLeft > 0) {
-		position -= pageHeight;
-		pdf.addPage();
-
-		if (isDarkMode) {
-			pdf.setFillColor(0, 0, 0);
-			pdf.rect(0, 0, pageWidthMM, pageHeightMM, 'F'); // black bg
+	for (let i = 0; i < pages.length; i += 1) {
+		if (i > 0) {
+			pdf.addPage();
 		}
 
-		pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
-		heightLeft -= pageHeight;
+		const canvas = await renderPageCanvas(html2canvas, {
+			title: note.title,
+			headerHtml: pages[i].headerHtml,
+			bodyHtml: pages[i].bodyHtml,
+			footerHtml: pages[i].footerHtml
+		});
+
+		const pageWidth = pdf.internal.pageSize.getWidth();
+		const pageHeight = pdf.internal.pageSize.getHeight();
+		const imageHeight = (canvas.height * pageWidth) / canvas.width;
+		pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pageWidth, Math.min(imageHeight, pageHeight));
 	}
 
 	pdf.save(`${note.title}.pdf`);

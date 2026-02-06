@@ -64,12 +64,8 @@
 		deleteNoteById,
 		getNoteById,
 		updateNoteById,
-		getNoteComments,
-		createNoteComment,
-		updateNoteComment,
-		deleteNoteComment,
-		getNoteRevisions,
-		actOnNoteRevision
+		importNoteDocx,
+		exportNoteDocx
 	} from '$lib/apis/notes';
 
 	import RichTextInput from '../common/RichTextInput.svelte';
@@ -149,6 +145,7 @@
 	let titleGenerating = false;
 
 	let dragged = false;
+	let importDocxStoreOriginalAttachment = false;
 	let loading = false;
 
 	let editing = false;
@@ -600,6 +597,42 @@ ${content}
 				await downloadPdf(note);
 			} catch (error) {
 				toast.error(`${error}`);
+			}
+		} else if (type === 'docx') {
+			try {
+				const res = await exportNoteDocx(localStorage.token, note.id);
+				if (res?.blob) {
+					saveAs(res.blob, `${note.title}.docx`);
+					if (res.report) {
+						toast.message($i18n.t('DOCX export report'), { description: res.report });
+					}
+				}
+			} catch (error) {
+				toast.error(`${error}`);
+			}
+		}
+	};
+
+
+
+	const importDocxToCurrentNote = async (file: File) => {
+		const res = await importNoteDocx(
+			localStorage.token,
+			file,
+			importDocxStoreOriginalAttachment
+		).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res?.note) {
+			note.title = res.note.title;
+			note.data = res.note.data;
+			note.meta = res.note.meta;
+			editor.commands.setContent(note.data.content.html);
+			changeDebounceHandler();
+			if (res?.report) {
+				toast.message($i18n.t('DOCX import report'), { description: JSON.stringify(res.report) });
 			}
 		}
 	};
@@ -1109,6 +1142,17 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 							</Tooltip>
 								{/if}
 
+								<input
+									id="note-editor-import-docx"
+									type="file"
+									accept=".docx"
+									class="hidden"
+									on:change={async (e) => {
+										const file = (e.target as HTMLInputElement).files?.[0];
+										if (file) await importDocxToCurrentNote(file);
+									}}
+								/>
+
 								<NoteMenu
 									onDownload={(type) => {
 										downloadHandler(type);
@@ -1136,6 +1180,9 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 										if (res) {
 											toast.success($i18n.t('Copied to clipboard'));
 										}
+									}}
+									onImportDocx={() => {
+										(document.getElementById('note-editor-import-docx') as HTMLInputElement)?.click();
 									}}
 									onDelete={() => {
 										showDeleteConfirm = true;
