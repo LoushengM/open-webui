@@ -31,7 +31,14 @@
 
 	import { goto } from '$app/navigation';
 	import { WEBUI_NAME, config, prompts as _prompts, user } from '$lib/stores';
-	import { createNewNote, deleteNoteById, getNoteList, searchNotes } from '$lib/apis/notes';
+	import {
+		createNewNote,
+		deleteNoteById,
+		getNoteList,
+		searchNotes,
+		importNoteDocx,
+		exportNoteDocx
+	} from '$lib/apis/notes';
 	import { capitalizeFirstLetter, copyToClipboard, getTimeRange } from '$lib/utils';
 	import { downloadPdf, createNoteHandler } from './utils';
 
@@ -51,6 +58,7 @@
 	let loaded = false;
 
 	let importFiles = '';
+	let importDocxStoreOriginalAttachment = false;
 	let selectedNote = null;
 	let showDeleteConfirm = false;
 
@@ -84,6 +92,18 @@
 			} catch (error) {
 				toast.error(`${error}`);
 			}
+		} else if (type === 'docx') {
+			try {
+				const res = await exportNoteDocx(localStorage.token, selectedNote.id);
+				if (res?.blob) {
+					saveAs(res.blob, `${selectedNote.title}.docx`);
+					if (res.report) {
+						toast.message($i18n.t('DOCX export report'), { description: res.report });
+					}
+				}
+			} catch (error) {
+				toast.error(`${error}`);
+			}
 		}
 	};
 
@@ -102,44 +122,56 @@
 		// Check if all the file is a markdown file and extract name and content
 
 		for (const file of inputFiles) {
-			if (file.type !== 'text/markdown') {
-				toast.error($i18n.t('Only markdown files are allowed'));
-				return;
-			}
+			if (file.type === 'text/markdown' || file.name.toLowerCase().endsWith('.md')) {
+				const reader = new FileReader();
+				reader.onload = async (event) => {
+					const content = event.target.result;
+					let name = file.name.replace(/\.md$/, '');
 
-			const reader = new FileReader();
-			reader.onload = async (event) => {
-				const content = event.target.result;
-				let name = file.name.replace(/\.md$/, '');
+					if (typeof content !== 'string') {
+						toast.error($i18n.t('Invalid file content'));
+						return;
+					}
 
-				if (typeof content !== 'string') {
-					toast.error($i18n.t('Invalid file content'));
-					return;
-				}
+					const res = await createNewNote(localStorage.token, {
+						title: name,
+						data: {
+							content: { json: null, html: marked.parse(content ?? ''), md: content }
+						},
+						meta: null,
+						access_control: {}
+					}).catch((error) => {
+						toast.error(`${error}`);
+						return null;
+					});
 
-				// Create a new note with the content
-				const res = await createNewNote(localStorage.token, {
-					title: name,
-					data: {
-						content: {
-							json: null,
-							html: marked.parse(content ?? ''),
-							md: content
-						}
-					},
-					meta: null,
-					access_control: {}
-				}).catch((error) => {
+					if (res) {
+						init();
+					}
+				};
+
+				reader.readAsText(file);
+			} else if (file.name.toLowerCase().endsWith('.docx')) {
+				const res = await importNoteDocx(
+					localStorage.token,
+					file,
+					importDocxStoreOriginalAttachment
+				).catch((error) => {
 					toast.error(`${error}`);
 					return null;
 				});
 
-				if (res) {
+				if (res?.note) {
+					toast.success($i18n.t('DOCX imported successfully'));
+					if (res?.report) {
+						toast.message($i18n.t('DOCX import report'), { description: JSON.stringify(res.report) });
+					}
 					init();
 				}
-			};
-
-			reader.readAsText(file);
+			} else {
+				toast.error($i18n.t('Only markdown (.md) and Word (.docx) files are allowed'));
+				return;
+			}
 		}
 	};
 
@@ -330,6 +362,10 @@
 				</div>
 
 				<div class="flex w-full justify-end gap-1.5">
+					<input class="hidden" id="notes-import-input" type="file" accept=".md,.docx" multiple on:change={(e) => {
+						const files = Array.from((e.target as HTMLInputElement).files || []);
+						if (files.length) inputFilesHandler(files);
+					}} />
 					<button
 						class=" px-2 py-1.5 rounded-xl bg-black text-white dark:bg-white dark:text-black transition font-medium text-sm flex items-center"
 						on:click={async () => {
@@ -343,6 +379,15 @@
 						<Plus className="size-3" strokeWidth="2.5" />
 
 						<div class=" ml-1 text-xs">{$i18n.t('New Note')}</div>
+					</button>
+
+					<button
+						class="px-2 py-1.5 rounded-xl border border-gray-200 dark:border-gray-800 transition font-medium text-sm flex items-center"
+						on:click={() => {
+							document.getElementById('notes-import-input')?.click();
+						}}
+					>
+						<div class="text-xs">{$i18n.t('Import .md/.docx')}</div>
 					</button>
 				</div>
 			</div>
@@ -517,10 +562,13 @@
 																				toast.error($i18n.t('Failed to copy link'));
 																			}
 																		}}
-																		onDelete={() => {
-																			selectedNote = note;
-																			showDeleteConfirm = true;
-																		}}
+																		onImportDocx={() => {
+												document.getElementById('notes-import-input')?.click();
+											}}
+											onDelete={() => {
+												selectedNote = note;
+												showDeleteConfirm = true;
+											}}
 																	>
 																		<button
 																			class="self-center w-fit text-sm p-1 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
@@ -579,10 +627,13 @@
 																				toast.error($i18n.t('Failed to copy link'));
 																			}
 																		}}
-																		onDelete={() => {
-																			selectedNote = note;
-																			showDeleteConfirm = true;
-																		}}
+																		onImportDocx={() => {
+												document.getElementById('notes-import-input')?.click();
+											}}
+											onDelete={() => {
+												selectedNote = note;
+												showDeleteConfirm = true;
+											}}
 																	>
 																		<button
 																			class="self-center w-fit text-sm p-1 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
