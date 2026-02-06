@@ -188,6 +188,21 @@ export class SocketIOCollaborationProvider {
 			}
 		});
 
+
+		this.socket.on('ydoc:revision:action', (data) => {
+			if (data?.note_id && `note:${data.note_id}` !== this.documentId) return;
+			if (data?.action === 'reject' && Array.isArray(data?.transformed_operations)) {
+				try {
+					const transformed = new Uint8Array(data.transformed_operations);
+					if (transformed.length > 0) {
+						Y.applyUpdate(this.doc, transformed, 'server');
+					}
+				} catch (error) {
+					console.error('Error applying transformed revision update:', error);
+				}
+			}
+		});
+
 		// Handle connection events
 		this.socket.on('connect', this.onConnect);
 		this.socket.on('disconnect', this.onDisconnect);
@@ -196,11 +211,19 @@ export class SocketIOCollaborationProvider {
 		this.doc.on('update', async (update, origin) => {
 			if (this.editor && origin !== 'server' && this.isConnected) {
 				await tick(); // Ensure the DOM is updated before sending
+				const now = Date.now();
 				this.socket.emit('ydoc:document:update', {
 					document_id: this.documentId,
 					user_id: this.user?.id,
+					user_name: this.user?.name,
 					socket_id: this.socket.id,
 					update: Array.from(update),
+					revision_event: {
+						author_id: this.user?.id,
+						author_name: this.user?.name,
+						timestamp: now,
+						update: Array.from(update)
+					},
 					data: {
 						content: this.editorContentGetter?.() ?? {
 							md: '',
@@ -251,6 +274,7 @@ export class SocketIOCollaborationProvider {
 		this.socket.off('ydoc:document:update');
 		this.socket.off('ydoc:document:state');
 		this.socket.off('ydoc:awareness:update');
+		this.socket.off('ydoc:revision:action');
 		this.socket.off('connect', this.onConnect);
 		this.socket.off('disconnect', this.onDisconnect);
 

@@ -75,6 +75,25 @@ class NoteUpdateForm(BaseModel):
     access_control: Optional[dict] = None
 
 
+
+
+class NoteRevisionForm(BaseModel):
+    update: list[int]
+    content: Optional[dict] = None
+
+
+class NoteCommentForm(BaseModel):
+    text: str
+    anchor_from: int
+    anchor_to: int
+
+
+class NoteCommentUpdateForm(BaseModel):
+    text: Optional[str] = None
+    anchor_from: Optional[int] = None
+    anchor_to: Optional[int] = None
+    resolved: Optional[bool] = None
+
 class NoteUserResponse(NoteModel):
     user: Optional[UserResponse] = None
 
@@ -407,6 +426,164 @@ class NoteTable:
                 return True
         except Exception:
             return False
+
+    def insert_revision_event(
+        self,
+        note_id: str,
+        user_id: str,
+        user_name: str,
+        update: list[int],
+        content: Optional[dict] = None,
+        db: Optional[Session] = None,
+    ) -> Optional[dict]:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                return None
+
+            data = note.data or {}
+            revisions = data.get("revisions") or []
+            revision = {
+                "id": str(uuid.uuid4()),
+                "author_id": user_id,
+                "author_name": user_name,
+                "timestamp": int(time.time_ns()),
+                "update": update,
+                "content": content or {},
+                "status": "pending",
+            }
+            revisions.append(revision)
+            data["revisions"] = revisions
+            note.data = data
+            note.updated_at = int(time.time_ns())
+            db.commit()
+            return revision
+
+    def get_note_revisions(self, note_id: str, db: Optional[Session] = None) -> list[dict]:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                return []
+            return (note.data or {}).get("revisions") or []
+
+    def update_revision_status(
+        self, note_id: str, revision_id: str, status: str, db: Optional[Session] = None
+    ) -> Optional[dict]:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                return None
+
+            data = note.data or {}
+            revisions = data.get("revisions") or []
+            updated_revision = None
+            for revision in revisions:
+                if revision.get("id") == revision_id:
+                    revision["status"] = status
+                    revision["reviewed_at"] = int(time.time_ns())
+                    updated_revision = revision
+                    break
+
+            if not updated_revision:
+                return None
+
+            data["revisions"] = revisions
+            note.data = data
+            note.updated_at = int(time.time_ns())
+            db.commit()
+            return updated_revision
+
+    def get_note_comments(self, note_id: str, db: Optional[Session] = None) -> list[dict]:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                return []
+            return (note.data or {}).get("comments") or []
+
+    def insert_note_comment(
+        self,
+        note_id: str,
+        user_id: str,
+        user_name: str,
+        form_data: NoteCommentForm,
+        db: Optional[Session] = None,
+    ) -> Optional[dict]:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                return None
+
+            data = note.data or {}
+            comments = data.get("comments") or []
+            comment = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "user_name": user_name,
+                "text": form_data.text,
+                "anchor_from": form_data.anchor_from,
+                "anchor_to": form_data.anchor_to,
+                "resolved": False,
+                "created_at": int(time.time_ns()),
+                "updated_at": int(time.time_ns()),
+            }
+            comments.append(comment)
+            data["comments"] = comments
+            note.data = data
+            note.updated_at = int(time.time_ns())
+            db.commit()
+            return comment
+
+    def update_note_comment(
+        self,
+        note_id: str,
+        comment_id: str,
+        form_data: NoteCommentUpdateForm,
+        db: Optional[Session] = None,
+    ) -> Optional[dict]:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                return None
+
+            data = note.data or {}
+            comments = data.get("comments") or []
+            payload = form_data.model_dump(exclude_unset=True)
+            updated_comment = None
+            for comment in comments:
+                if comment.get("id") == comment_id:
+                    comment.update(payload)
+                    comment["updated_at"] = int(time.time_ns())
+                    updated_comment = comment
+                    break
+
+            if not updated_comment:
+                return None
+
+            data["comments"] = comments
+            note.data = data
+            note.updated_at = int(time.time_ns())
+            db.commit()
+            return updated_comment
+
+    def delete_note_comment(
+        self, note_id: str, comment_id: str, db: Optional[Session] = None
+    ) -> bool:
+        with get_db_context(db) as db:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                return False
+
+            data = note.data or {}
+            comments = data.get("comments") or []
+            updated_comments = [c for c in comments if c.get("id") != comment_id]
+            if len(updated_comments) == len(comments):
+                return False
+
+            data["comments"] = updated_comments
+            note.data = data
+            note.updated_at = int(time.time_ns())
+            db.commit()
+            return True
 
 
 Notes = NoteTable()
