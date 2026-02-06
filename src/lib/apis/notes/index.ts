@@ -284,3 +284,99 @@ export const deleteNoteById = async (token: string, id: string) => {
 
 	return res;
 };
+
+export const getNoteRevisions = async (token: string, id: string) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/revisions`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!res.ok) throw (await res.json()).detail;
+	return res.json();
+};
+
+export const getNoteComments = async (token: string, id: string) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!res.ok) throw (await res.json()).detail;
+	return res.json();
+};
+
+export const createNoteComment = async (token: string, id: string, comment: object) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments/create`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(comment)
+	});
+
+	if (!res.ok) throw (await res.json()).detail;
+	return res.json();
+};
+
+export const updateNoteComment = async (
+	token: string,
+	id: string,
+	commentId: string,
+	comment: object
+) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments/${commentId}/update`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(comment)
+	});
+
+	if (!res.ok) throw (await res.json()).detail;
+	return res.json();
+};
+
+export const deleteNoteComment = async (token: string, id: string, commentId: string) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/comments/${commentId}/delete`, {
+		method: 'DELETE',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!res.ok) throw (await res.json()).detail;
+	return res.json();
+};
+
+export const actOnNoteRevision = async (
+	token: string,
+	id: string,
+	revisionId: string,
+	action: 'accept' | 'reject'
+) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/notes/${id}/revisions/${revisionId}/${action}`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!res.ok) throw (await res.json()).detail;
+	return res.json();
+};
