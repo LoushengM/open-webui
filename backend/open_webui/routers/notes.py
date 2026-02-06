@@ -16,6 +16,8 @@ from open_webui.models.notes import (
     NoteModel,
     NoteForm,
     NoteUserResponse,
+    NoteCommentForm,
+    NoteCommentUpdateForm,
 )
 
 from open_webui.config import (
@@ -48,6 +50,32 @@ class NoteItemResponse(BaseModel):
     created_at: int
     user: Optional[UserResponse] = None
 
+
+
+
+def _ensure_note_access(request: Request, note_id: str, user, db: Session, access_type: str = "read"):
+    if user.role != "admin" and not has_permission(
+        user.id, "features.notes", request.app.state.config.USER_PERMISSIONS, db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.UNAUTHORIZED,
+        )
+
+    note = Notes.get_note_by_id(note_id, db=db)
+    if not note:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND
+        )
+
+    if user.role != "admin" and user.id != note.user_id and not has_access(
+        user.id, type=access_type, access_control=note.access_control, db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.DEFAULT()
+        )
+
+    return note
 
 @router.get("/", response_model=list[NoteItemResponse])
 async def get_notes(
@@ -289,6 +317,125 @@ async def update_note_by_id(
             status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT()
         )
 
+
+
+
+@router.get("/{id}/revisions", response_model=list[dict])
+async def get_note_revisions(
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    _ensure_note_access(request, id, user, db, access_type="read")
+    return Notes.get_note_revisions(id, db=db)
+
+
+@router.post("/{id}/revisions/{revision_id}/{action}", response_model=dict)
+async def review_note_revision(
+    request: Request,
+    id: str,
+    revision_id: str,
+    action: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    note = _ensure_note_access(request, id, user, db, access_type="write")
+
+    if action not in ["accept", "reject"]:
+        raise HTTPException(status_code=400, detail=ERROR_MESSAGES.INVALID_INPUT)
+
+    status_value = "accepted" if action == "accept" else "rejected"
+    revision = Notes.update_revision_status(id, revision_id, status_value, db=db)
+    if not revision:
+        raise HTTPException(status_code=404, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    payload = {
+        "note_id": id,
+        "type": "revision_reviewed",
+        "action": action,
+        "revision": revision,
+        "transformed_operations": revision.get("update", []),
+        "transformed_at": revision.get("reviewed_at"),
+    }
+
+    await sio.emit("note-events", payload, to=f"note:{id}")
+    await sio.emit("ydoc:revision:action", payload, room=f"doc_note:{id}")
+
+    return payload
+
+
+@router.get("/{id}/comments", response_model=list[dict])
+async def get_note_comments(
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    _ensure_note_access(request, id, user, db, access_type="read")
+    return Notes.get_note_comments(id, db=db)
+
+
+@router.post("/{id}/comments/create", response_model=dict)
+async def create_note_comment(
+    request: Request,
+    id: str,
+    form_data: NoteCommentForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    _ensure_note_access(request, id, user, db, access_type="write")
+    comment = Notes.insert_note_comment(id, user.id, user.name, form_data, db=db)
+
+    await sio.emit(
+        "note-events",
+        {"id": id, "type": "comment_created", "comment": comment},
+        to=f"note:{id}",
+    )
+    return comment
+
+
+@router.post("/{id}/comments/{comment_id}/update", response_model=dict)
+async def update_note_comment(
+    request: Request,
+    id: str,
+    comment_id: str,
+    form_data: NoteCommentUpdateForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    _ensure_note_access(request, id, user, db, access_type="write")
+    comment = Notes.update_note_comment(id, comment_id, form_data, db=db)
+    if not comment:
+        raise HTTPException(status_code=404, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    await sio.emit(
+        "note-events",
+        {"id": id, "type": "comment_updated", "comment": comment},
+        to=f"note:{id}",
+    )
+    return comment
+
+
+@router.delete("/{id}/comments/{comment_id}/delete", response_model=bool)
+async def delete_note_comment(
+    request: Request,
+    id: str,
+    comment_id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    _ensure_note_access(request, id, user, db, access_type="write")
+    deleted = Notes.delete_note_comment(id, comment_id, db=db)
+
+    if deleted:
+        await sio.emit(
+            "note-events",
+            {"id": id, "type": "comment_deleted", "comment_id": comment_id},
+            to=f"note:{id}",
+        )
+
+    return deleted
 
 ############################
 # DeleteNoteById

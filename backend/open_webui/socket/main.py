@@ -606,6 +606,17 @@ async def yjs_document_update(sid, data):
             update=update,  # Convert list of bytes to bytes
         )
 
+        if document_id.startswith("note:"):
+            note_id = document_id.split(":", 1)[1]
+            session_user = SESSION_POOL.get(sid) or {}
+            Notes.insert_revision_event(
+                note_id=note_id,
+                user_id=session_user.get("id", user_id),
+                user_name=session_user.get("name", data.get("user_name", "Unknown")),
+                update=update,
+                content=(data.get("data") or {}).get("content", {}),
+            )
+
         # Broadcast update to all other users in the document
         await sio.emit(
             "ydoc:document:update",
