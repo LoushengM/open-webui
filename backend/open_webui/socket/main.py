@@ -613,6 +613,7 @@ async def yjs_document_update(sid, data):
                 "document_id": document_id,
                 "user_id": user_id,
                 "update": update,
+                "data": data.get("data", {}),
                 "socket_id": sid,  # Add socket_id to match frontend filtering
             },
             room=f"doc_{document_id}",
