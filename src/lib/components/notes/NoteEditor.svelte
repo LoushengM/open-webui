@@ -131,6 +131,9 @@
 
 	let showPanel = false;
 	let selectedPanel = 'chat';
+	let comments = [];
+	let revisions = [];
+	let commentDraft = '';
 
 	let selectedContent = null;
 
@@ -169,6 +172,8 @@
 		if (res) {
 			note = res;
 			files = res.data.files || [];
+			comments = await getNoteComments(localStorage.token, id).catch(() => []);
+			revisions = await getNoteRevisions(localStorage.token, id).catch(() => []);
 
 			if (note?.write_access) {
 				$socket?.emit('join-note', {
@@ -804,9 +809,58 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 		inputElement?.insertContent(content);
 	};
 
+
+	const createCommentAtSelection = async () => {
+		if (!selectedContent || !commentDraft.trim()) return;
+		const created = await createNoteComment(localStorage.token, id, {
+			text: commentDraft.trim(),
+			anchor_from: selectedContent.from,
+			anchor_to: selectedContent.to
+		}).catch(() => null);
+
+		if (created) {
+			comments = [...comments.filter((c) => c.id !== created.id), created];
+			commentDraft = '';
+		}
+	};
+
+	const toggleCommentResolved = async (comment) => {
+		const updated = await updateNoteComment(localStorage.token, id, comment.id, {
+			resolved: !comment.resolved
+		}).catch(() => null);
+		if (updated) comments = comments.map((c) => (c.id === updated.id ? updated : c));
+	};
+
+	const deleteCommentById = async (commentId) => {
+		const deleted = await deleteNoteComment(localStorage.token, id, commentId).catch(() => false);
+		if (deleted) comments = comments.filter((c) => c.id !== commentId);
+	};
+
+	const reviewRevision = async (revisionId, action: 'accept' | 'reject') => {
+		const res = await actOnNoteRevision(localStorage.token, id, revisionId, action).catch(() => null);
+		if (res?.revision) revisions = revisions.map((r) => (r.id === res.revision.id ? res.revision : r));
+	};
+
 	const noteEventHandler = async (_note) => {
 		console.log('noteEventHandler', _note);
-		if (_note.id !== id) return;
+		if (_note.id !== id && _note.note_id !== id) return;
+
+		if (_note.type === 'comment_created' && _note.comment) {
+			comments = [...comments.filter((c) => c.id !== _note.comment.id), _note.comment];
+			return;
+		}
+		if (_note.type === 'comment_updated' && _note.comment) {
+			comments = comments.map((c) => (c.id === _note.comment.id ? _note.comment : c));
+			return;
+		}
+		if (_note.type === 'comment_deleted' && _note.comment_id) {
+			comments = comments.filter((c) => c.id !== _note.comment_id);
+			return;
+		}
+		if (_note.type === 'revision_reviewed' && _note.revision) {
+			revisions = revisions.map((r) => (r.id === _note.revision.id ? _note.revision : r));
+			return;
+		}
 
 		if (_note.access_control && _note.access_control !== note.access_control) {
 			note.access_control = _note.access_control;
@@ -1070,6 +1124,22 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 											<AdjustmentsHorizontalOutline />
 										</button>
 									</Tooltip>
+
+							<Tooltip placement="top" content={$i18n.t('Comments & Revisions')} className="cursor-pointer">
+								<button
+									class="p-1.5 bg-transparent hover:bg-white/5 transition rounded-lg"
+									on:click={() => {
+										if (showPanel && selectedPanel === 'comments') {
+											showPanel = false;
+										} else {
+											showPanel = true;
+											selectedPanel = 'comments';
+										}
+									}}
+								>
+									<Bars3BottomLeft className="size-4" />
+								</button>
+							</Tooltip>
 								{/if}
 
 								<input
@@ -1307,6 +1377,21 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 								}
 							}}
 						/>
+						{#if comments.length > 0}
+							<div class="pb-2 flex flex-wrap gap-1">
+								{#each comments as comment}
+									<button
+										class="text-[10px] px-1.5 py-0.5 border border-gray-200 dark:border-gray-700 rounded-full"
+										on:click={() => {
+											selectedPanel = 'comments';
+											showPanel = true;
+										}}
+									>
+										# {comment.anchor_from}-{comment.anchor_to}
+									</button>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				</div>
 			{/if}
@@ -1460,6 +1545,44 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 					changeDebounceHandler();
 				}}
 			/>
+
+		{:else if selectedPanel === 'comments'}
+			<div class="p-3 text-sm space-y-3 overflow-y-auto h-full">
+				<div>
+					<div class="font-medium mb-1">{$i18n.t('New Comment')}</div>
+					<textarea class="w-full p-2 rounded-md bg-gray-50 dark:bg-gray-900" rows="3" bind:value={commentDraft}></textarea>
+					<button class="mt-2 px-2 py-1 text-xs rounded bg-gray-100 dark:bg-gray-800" on:click={createCommentAtSelection} disabled={!selectedContent}>
+						{$i18n.t('Comment on selection')}
+					</button>
+				</div>
+				<div>
+					<div class="font-medium mb-1">{$i18n.t('Comments')}</div>
+					{#each comments as comment}
+						<div class="border border-gray-100 dark:border-gray-800 rounded-md p-2 mb-2">
+							<div class="text-xs text-gray-500">{comment.user_name} · {comment.anchor_from}-{comment.anchor_to}</div>
+							<div>{comment.text}</div>
+							<div class="flex gap-2 mt-1 text-xs">
+								<button on:click={() => toggleCommentResolved(comment)}>{comment.resolved ? $i18n.t('Reopen') : $i18n.t('Resolve')}</button>
+								<button on:click={() => deleteCommentById(comment.id)}>{$i18n.t('Delete')}</button>
+							</div>
+						</div>
+					{/each}
+				</div>
+				<div>
+					<div class="font-medium mb-1">{$i18n.t('Revisions')}</div>
+					{#each revisions as revision}
+						<div class="border border-gray-100 dark:border-gray-800 rounded-md p-2 mb-2">
+							<div class="text-xs text-gray-500">{revision.author_name} · {revision.status}</div>
+							{#if revision.status === 'pending' && note?.write_access}
+								<div class="flex gap-2 mt-1 text-xs">
+									<button on:click={() => reviewRevision(revision.id, 'accept')}>{$i18n.t('Accept')}</button>
+									<button on:click={() => reviewRevision(revision.id, 'reject')}>{$i18n.t('Reject')}</button>
+								</div>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			</div>
 		{/if}
 	</NotePanel>
 </PaneGroup>
