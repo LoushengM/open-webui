@@ -118,27 +118,25 @@
 
 	import { AIAutocompletion } from './RichTextInput/AutoCompletion.js';
 
-	import StarterKit from '@tiptap/starter-kit';
 
 	// Bubble and Floating menus are currently fixed to v2 due to styling issues in v3
 	// TODO: Update to v3 when styling issues are resolved
 	import BubbleMenu from '@tiptap/extension-bubble-menu';
 	import FloatingMenu from '@tiptap/extension-floating-menu';
 
-	import { TableKit } from '@tiptap/extension-table';
-	import { ListKit } from '@tiptap/extension-list';
 	import { Placeholder, CharacterCount } from '@tiptap/extensions';
 
 	import Image from './RichTextInput/Image/index.js';
 	// import TiptapImage from '@tiptap/extension-image';
 
 	import FileHandler from '@tiptap/extension-file-handler';
-	import Typography from '@tiptap/extension-typography';
-	import Highlight from '@tiptap/extension-highlight';
-	import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
 
 	import Mention from '@tiptap/extension-mention';
 	import FormattingButtons from './RichTextInput/FormattingButtons.svelte';
+	import { getCoreFormattingExtensions } from './RichTextInput/extensions/coreFormattingExtensions';
+	import { getLayoutExtensions } from './RichTextInput/extensions/layoutExtensions';
+	import { getReferenceExtensions } from './RichTextInput/extensions/referenceExtensions';
+	import { getReviewExtensions } from './RichTextInput/extensions/reviewExtensions';
 
 	import { PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 	import { createLowlight } from 'lowlight';
@@ -246,6 +244,7 @@
 
 	export let json = false;
 	export let raw = false;
+	export let canonicalJson = '';
 	export let editable = true;
 	export let collaboration = false;
 
@@ -646,7 +645,29 @@
 	onMount(async () => {
 		content = value;
 
-		if (json) {
+		if (richText && typeof value === 'string' && !json && !raw) {
+			try {
+				const parsed = JSON.parse(value);
+				if (parsed && typeof parsed === 'object' && parsed.type === 'doc') {
+					content = parsed;
+					canonicalJson = value;
+				}
+			} catch {
+				// Not canonical JSON, fallback to markdown parsing path
+			}
+		}
+
+		if (canonicalJson) {
+			if (typeof canonicalJson === 'string') {
+				try {
+					content = JSON.parse(canonicalJson);
+				} catch {
+					content = canonicalJson;
+				}
+			} else {
+				content = canonicalJson;
+			}
+		} else if (json) {
 			if (!content) {
 				content = html ? html : null;
 			}
@@ -687,32 +708,22 @@
 			const { SocketIOCollaborationProvider } = await import('./RichTextInput/Collaboration');
 			provider = new SocketIOCollaborationProvider(documentId, socket, user, content);
 		}
+		const richTextFeatureExtensions = richText
+			? [
+					...getCoreFormattingExtensions({ link, lowlight }),
+					...getLayoutExtensions(),
+					...getReferenceExtensions(),
+					...getReviewExtensions()
+				]
+			: [];
+
 		editor = new Editor({
 			element: element,
 			extensions: [
-				StarterKit.configure({
-					link: link
-				}),
+				...richTextFeatureExtensions,
 				...(dragHandle ? [ListItemDragHandle] : []),
 				Placeholder.configure({ placeholder: () => _placeholder, showOnlyWhenEditable: false }),
 				SelectionDecoration,
-
-				...(richText
-					? [
-							CodeBlockLowlight.configure({
-								lowlight
-							}),
-							Typography,
-							TableKit.configure({
-								table: { resizable: true }
-							}),
-							ListKit.configure({
-								taskItem: {
-									nested: true
-								}
-							})
-						]
-					: []),
 				...(suggestions
 					? [
 							Mention.configure({
@@ -801,6 +812,7 @@
 
 				htmlValue = editor.getHTML();
 				jsonValue = editor.getJSON();
+				canonicalJson = JSON.stringify(jsonValue);
 
 				if (richText) {
 					mdValue = turndownService
@@ -831,24 +843,22 @@
 					md: mdValue
 				});
 
-				if (json) {
-					value = jsonValue;
+				if (json || richText) {
+					value = canonicalJson;
+				} else if (raw) {
+					value = htmlValue;
 				} else {
-					if (raw) {
-						value = htmlValue;
-					} else {
-						if (!preserveBreaks) {
-							mdValue = mdValue.replace(/<br\/>/g, '');
-						}
+					if (!preserveBreaks) {
+						mdValue = mdValue.replace(/<br\/>/g, '');
+					}
 
-						if (value !== mdValue) {
-							value = mdValue;
+					if (value !== mdValue) {
+						value = mdValue;
 
-							// check if the node is paragraph as well
-							if (editor.isActive('paragraph')) {
-								if (value === '') {
-									editor.commands.clearContent();
-								}
+						// check if the node is paragraph as well
+						if (editor.isActive('paragraph')) {
+							if (value === '') {
+								editor.commands.clearContent();
 							}
 						}
 					}
